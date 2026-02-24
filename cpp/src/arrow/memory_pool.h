@@ -39,6 +39,13 @@ namespace internal {
 /// \brief Memory pool statistics
 ///
 /// 64-byte aligned so that all atomic values are on the same cache line.
+// MemoryPoolStats 是一个高性能的辅助类，专门用于实时跟踪和统计内存分配器的运行状态。
+// MemoryPoolStats 的核心作用是监控内存使用情况。它被嵌入在各种 MemoryPool 实现（如系统默认内存池、Jemalloc 或 Mimalloc 内存池）中，用于：
+// 实时计数：记录当前已分配的内存字节数。
+// 峰值监控：记录内存池自创建以来达到的最大内存负载（水位线）。
+// 累计统计：统计历史累计分配的字节总数和分配次数，用于评估内存碎片或分配压力。
+// 高性能并发支持：通过原子操作（Atomic）和缓存行对齐（Cache-line alignment），该类可以在多线程环境下并发更新，且不会造成严重的性能抖动。
+// alignas(64)： 将类实例对齐到 64 字节（现代 CPU 常见的缓存行大小）
 class alignas(64) MemoryPoolStats {
  private:
   // All atomics are updated according to Acquire-Release ordering.
@@ -46,24 +53,33 @@ class alignas(64) MemoryPoolStats {
   //
   // max_memory_, total_allocated_bytes_, and num_allocs_ only go up (they are
   // monotonically increasing) which can allow some optimizations.
+  // 记录历史最高内存占用（Peak Memory usage）
+  // 单调递增，只有在当前分配后的总量超过历史最大值时才会更新。
   std::atomic<int64_t> max_memory_{0};
+  // 记录当前正在使用的内存字节数。
+  // 动态波动。分配时增加，释放时减少。
   std::atomic<int64_t> bytes_allocated_{0};
+  // 记录自内存池创建以来累计分配过的字节总数。
+  // 单调递增。即使内存被释放，该值也不会减小。
   std::atomic<int64_t> total_allocated_bytes_{0};
+  // 记录累计分配次数。
+  // 单调递增。每执行一次 Allocate 操作，该计数器加 1。
   std::atomic<int64_t> num_allocs_{0};
 
  public:
+  // 返回历史最高内存占用。
   int64_t max_memory() const { return max_memory_.load(std::memory_order_acquire); }
-
+  // 返回当前内存池占用的字节数
   int64_t bytes_allocated() const {
     return bytes_allocated_.load(std::memory_order_acquire);
   }
-
+  // 返回历史累计分配的总字节数。
   int64_t total_bytes_allocated() const {
     return total_allocated_bytes_.load(std::memory_order_acquire);
   }
-
+  // 返回历史累计分配的次数
   int64_t num_allocations() const { return num_allocs_.load(std::memory_order_acquire); }
-
+  // 在成功分配内存后更新所有统计指标。
   inline void DidAllocateBytes(int64_t size) {
     // Issue the load before everything else. max_memory_ is monotonically increasing,
     // so we can use a relaxed load before the read-modify-write.
@@ -86,7 +102,7 @@ class alignas(64) MemoryPoolStats {
                                          std::memory_order_acq_rel)) {
     }
   }
-
+  // 在释放内存后更新统计指标。
   inline void DidReallocateBytes(int64_t old_size, int64_t new_size) {
     if (new_size > old_size) {
       DidAllocateBytes(new_size - old_size);
@@ -94,7 +110,7 @@ class alignas(64) MemoryPoolStats {
       DidFreeBytes(old_size - new_size);
     }
   }
-
+  // 在进行重新分配（Reallocate）操作后更新指标。
   inline void DidFreeBytes(int64_t size) {
     bytes_allocated_.fetch_sub(size, std::memory_order_acq_rel);
   }
@@ -106,27 +122,42 @@ class alignas(64) MemoryPoolStats {
 ///
 /// Besides tracking the number of allocated bytes, the allocator also should
 /// take care of the required 64-byte alignment.
+// 在 Apache Arrow 项目中，MemoryPool（内存池）是整个库处理 CPU 内存分配的核心抽象。它不仅管理内存的申请与释放，还确保了数据布局符合高性能计算的需求。
+// MemoryPool 是一个抽象基类，定义了 Arrow 中内存管理的核心标准：
+// 强制对齐 (Alignment)：Arrow 依赖于 SIMD（单指令多数据）指令集来加速计算，而 SIMD 要求内存地址必须是对齐的。
+// MemoryPool 默认确保所有分配的内存都是 64 字节对齐。
+// 资源追踪 (Tracking)：实时监控内存的使用量、峰值以及分配次数，这对于防止内存泄漏和性能调优至关重要。
+// 后端无关性 (Backend Agnostic)：通过该抽象类，Arrow 可以无缝切换底层分配器，例如使用系统默认分配器、jemalloc 或 mimalloc，而上层逻辑不需要任何改动。
+// 内存碎片管理：通过统一的接口，内存池可以实现一些优化策略，如重用空闲块或将多余内存交还操作系统。
+
 class ARROW_EXPORT MemoryPool {
  public:
   virtual ~MemoryPool() = default;
 
   /// \brief EXPERIMENTAL. Create a new instance of the default MemoryPool
+  // 创建一个当前系统默认的内存池实例。
+  // 这通常会根据编译选项返回系统分配器、jemalloc 或 mimalloc 的封装。
   static std::unique_ptr<MemoryPool> CreateDefault();
 
   /// Allocate a new memory region of at least size bytes.
   ///
   /// The allocated region shall be 64-byte aligned.
+  // 分配至少 size 字节的内存。
+  // 它是对带 alignment 参数版本的封装，默认使用 64 字节对齐（kDefaultBufferAlignment）。分配成功后的指针通过 out 返回。
   Status Allocate(int64_t size, uint8_t** out) {
     return Allocate(size, kDefaultBufferAlignment, out);
   }
 
   /// Allocate a new memory region of at least size bytes aligned to alignment.
+  // 分配指定对齐大小的内存。这是子类必须实现的底层逻辑。
   virtual Status Allocate(int64_t size, int64_t alignment, uint8_t** out) = 0;
 
   /// Resize an already allocated memory section.
   ///
   /// As by default most default allocators on a platform don't support aligned
   /// reallocation, this function can involve a copy of the underlying data.
+  // 调整已分配内存的大小。
+  // 由于许多底层分配器不支持“对齐重分配”，该操作可能会涉及“申请新内存 -> 拷贝数据 -> 释放旧内存”的过程。
   virtual Status Reallocate(int64_t old_size, int64_t new_size, int64_t alignment,
                             uint8_t** ptr) = 0;
   Status Reallocate(int64_t old_size, int64_t new_size, uint8_t** ptr) {
@@ -140,6 +171,8 @@ class ARROW_EXPORT MemoryPool {
   ///   may use this for tracking the amount of allocated bytes as well as for
   ///   faster deallocation if supported by its backend.
   /// @param alignment The alignment of the allocation. Defaults to 64 bytes.
+  // 释放由该池分配的内存。
+  // 除了指针外，还要求传入 size 和 alignment，这有助于某些分配器（如 jemalloc）更高效地回收内存并准确统计数据。
   virtual void Free(uint8_t* buffer, int64_t size, int64_t alignment) = 0;
   void Free(uint8_t* buffer, int64_t size) {
     Free(buffer, size, kDefaultBufferAlignment);
@@ -150,37 +183,45 @@ class ARROW_EXPORT MemoryPool {
   /// Only applies to allocators that hold onto unused memory.  This will be
   /// best effort, a memory pool may not implement this feature or may be
   /// unable to fulfill the request due to fragmentation.
+  // 尽力而为（Best effort）地将池中持有的空闲内存归还给操作系统。这在防止内存碎片导致的虚高占用时非常有用。
   virtual void ReleaseUnused() {}
 
   /// Print statistics
   ///
   /// Print allocation statistics on stderr. The output format is
   /// implementation-specific. Not all memory pools implement this method.
+  // 将内存分配的统计信息输出到 stderr。
   virtual void PrintStats() {}
 
   /// The number of bytes that were allocated and not yet free'd through
   /// this allocator.
+  // 返回当前正在使用的内存字节数。
   virtual int64_t bytes_allocated() const = 0;
 
   /// Return peak memory allocation in this memory pool
   ///
   /// \return Maximum bytes allocated. If not known (or not implemented),
   /// returns -1
+  // 返回自该池创建以来达到的内存峰值。如果无法追踪则返回 -1。
   virtual int64_t max_memory() const;
 
   /// The number of bytes that were allocated.
+  // 返回该池自创建以来累计分配过的字节总数（不随释放而减小）
   virtual int64_t total_bytes_allocated() const = 0;
 
   /// The number of allocations or reallocations that were requested.
+  // 返回累计发起的分配/重分配请求次数。
   virtual int64_t num_allocations() const = 0;
 
   /// The name of the backend used by this MemoryPool (e.g. "system" or "jemalloc").
+  // 返回底层分配器的名称，如 "system"、"jemalloc" 或 "mimalloc"。
   virtual std::string backend_name() const = 0;
 
  protected:
   MemoryPool() = default;
 };
-
+// 在 Apache Arrow 项目中，LoggingMemoryPool 是一个典型的**装饰器模式（Decorator Pattern）**的应用。
+// 它通过包装另一个 MemoryPool 实例，为内存分配行为添加了日志记录或调试功能。
 class ARROW_EXPORT LoggingMemoryPool : public MemoryPool {
  public:
   explicit LoggingMemoryPool(MemoryPool* pool);
@@ -215,6 +256,9 @@ class ARROW_EXPORT LoggingMemoryPool : public MemoryPool {
 ///
 /// Tracks the number of bytes and maximum memory allocated through its direct
 /// calls. Actual allocation is delegated to MemoryPool class.
+// ProxyMemoryPool 的核心作用是隔离统计信息。
+// 当你有一个全局的 MemoryPool，但希望单独追踪某个特定子任务（例如某个特定的 Query 或特定的 DataSink）占用的内存时，你可以创建一个代理。
+// 它会将内存分配请求转发给底层池，但会独立记录通过这个代理分配的字节数和峰值。
 class ARROW_EXPORT ProxyMemoryPool : public MemoryPool {
  public:
   explicit ProxyMemoryPool(MemoryPool* pool);
@@ -251,6 +295,8 @@ class ARROW_EXPORT ProxyMemoryPool : public MemoryPool {
 /// Checking for limits is not done in a fully thread-safe way, therefore
 /// multi-threaded allocations might be able to go successfully above the
 /// configured limit.
+// CappedMemoryPool 是一个带上限保护的内存池。
+// 它的主要作用是限制内存使用的软上限。如果在分配请求时发现当前已分配量加上新请求量将超过预设的 limit，它会拒绝分配并返回错误（OOM）。
 class ARROW_EXPORT CappedMemoryPool : public MemoryPool {
  public:
   CappedMemoryPool(MemoryPool* wrapped_pool, int64_t bytes_allocated_limit)
