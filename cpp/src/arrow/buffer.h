@@ -49,6 +49,13 @@ namespace arrow {
 /// The Buffer base class does not own its memory, but subclasses often do.
 ///
 /// The following invariant is always true: Size <= Capacity
+// 在 Apache Arrow 项目中，Buffer 类是整个库的基础。它不仅管理着内存，还是连接逻辑数据结构（如 Array）与物理存储（如 RAM、GPU 显存）的桥梁
+// Buffer 是一个连续内存块的逻辑抽象。
+// 内存管理的核心：它封装了指向内存起始位置的指针和该块内存的大小。
+// 跨设备支持：它不仅支持 CPU 内存，还通过 MemoryManager 和 Device 支持 GPU（CUDA）等异构设备。
+// 生命周期管理：通过 parent_ 指针，Buffer 支持零拷贝切片。子 Buffer 可以引用父 Buffer 的一部分内存，同时确保父 Buffer 在子 Buffer 被释放前不会被销毁。
+// 只读与可写分离：基类 Buffer 默认通常是不可变的（只读），由子类（如 MutableBuffer）提供修改能力。
+
 class ARROW_EXPORT Buffer {
  public:
   ARROW_DISALLOW_COPY_AND_ASSIGN(Buffer);
@@ -59,6 +66,7 @@ class ARROW_EXPORT Buffer {
   /// \param[in] size buffer size
   ///
   /// \note The passed memory must be kept alive through some other means
+  // 从原始指针构造。假定为 CPU 内存，且不拥有内存所有权（调用者需保证指针有效性）。
   Buffer(const uint8_t* data, int64_t size)
       : is_mutable_(false),
         is_cpu_(true),
@@ -68,7 +76,8 @@ class ARROW_EXPORT Buffer {
         device_type_(DeviceAllocationType::kCPU) {
     SetMemoryManager(default_cpu_memory_manager());
   }
-
+  // 全能构造函数。
+  // 指定内存管理器、父 Buffer 和设备类型。
   Buffer(const uint8_t* data, int64_t size, std::shared_ptr<MemoryManager> mm,
          std::shared_ptr<Buffer> parent = NULLPTR,
          std::optional<DeviceAllocationType> device_type_override = std::nullopt)
@@ -86,7 +95,7 @@ class ARROW_EXPORT Buffer {
       device_type_ = *device_type_override;
     }
   }
-
+  // 使用地址（uintptr_t）构造，常用于非 CPU 地址（如 GPU）。
   Buffer(uintptr_t address, int64_t size, std::shared_ptr<MemoryManager> mm,
          std::shared_ptr<Buffer> parent = NULLPTR)
       : Buffer(reinterpret_cast<const uint8_t*>(address), size, std::move(mm),
@@ -98,6 +107,7 @@ class ARROW_EXPORT Buffer {
   ///
   /// \note The memory viewed by data must not be deallocated in the lifetime of the
   /// Buffer; temporary rvalue strings must be stored in an lvalue somewhere
+  // 从 string_view 构造，不拷贝数据。
   explicit Buffer(std::string_view data)
       : Buffer(reinterpret_cast<const uint8_t*>(data.data()),
                static_cast<int64_t>(data.size())) {}
@@ -111,6 +121,7 @@ class ARROW_EXPORT Buffer {
   /// This method makes no assertions about alignment or padding of the buffer but
   /// in general we expected buffers to be aligned and padded to 64 bytes.  In the future
   /// we might add utility methods to help determine if a buffer satisfies this contract.
+  // 关键构造函数。创建一个指向父 Buffer 内部特定范围（offset 到 offset+size）的新 Buffer，实现零拷贝切片。
   Buffer(std::shared_ptr<Buffer> parent, const int64_t offset, const int64_t size)
       : Buffer(parent->data_ + offset, size) {
     parent_ = std::move(parent);
@@ -151,6 +162,7 @@ class ARROW_EXPORT Buffer {
   ///
   /// \param[in] data a string to own
   /// \return a new Buffer instance
+  // 接收一个字符串并接管其内存所有权（使用移动语义）
   static std::shared_ptr<Buffer> FromString(std::string data);
 
   /// \brief Construct an immutable buffer that takes ownership of the contents
@@ -159,6 +171,7 @@ class ARROW_EXPORT Buffer {
   ///
   /// \param[in] vec a vector to own
   /// \return a new Buffer instance
+  // 接管 vector 的内容，利用 Lambda 析构函数确保 vector 在 Buffer 销毁时才释放。
   template <typename T>
   static std::shared_ptr<Buffer> FromVector(std::vector<T> vec) {
     static_assert(std::is_trivial_v<T>,
@@ -184,6 +197,7 @@ class ARROW_EXPORT Buffer {
   /// \param[in] data the typed memory as C array
   /// \param[in] length the number of values in the array
   /// \return a new shared_ptr<Buffer>
+  // 创建一个“引用”外部内存的 Buffer（不拥有所有权，不拷贝）。
   template <typename T, typename SizeType = int64_t>
   static std::shared_ptr<Buffer> Wrap(const T* data, SizeType length) {
     return std::make_shared<Buffer>(reinterpret_cast<const uint8_t*>(data),
@@ -218,6 +232,7 @@ class ARROW_EXPORT Buffer {
   /// Otherwise, an assertion may be thrown or a null pointer may be returned.
   ///
   /// To get the buffer's data address regardless of its device, call `address()`.
+  // 返回指向数据的常量指针。在非 CPU 设备上调用会抛出断言。
   const uint8_t* data() const {
 #ifndef NDEBUG
     CheckCPU();
@@ -229,6 +244,7 @@ class ARROW_EXPORT Buffer {
   ///
   /// The buffer has to be a CPU buffer (`is_cpu()` is true).
   /// Otherwise, an assertion may be thrown or a null pointer may be returned.
+  // 返回指向数据的常量指针。在非 CPU 设备上调用会抛出断言。
   template <typename T>
   const T* data_as() const {
     return reinterpret_cast<const T*>(data());
@@ -248,6 +264,7 @@ class ARROW_EXPORT Buffer {
   ///
   /// To get the buffer's mutable data address regardless of its device, call
   /// `mutable_address()`.
+  // 返回指向数据的可写指针。必须在 is_mutable_ 为 true 且是 CPU 内存时有效。
   uint8_t* mutable_data() {
 #ifndef NDEBUG
     CheckCPU();
@@ -262,6 +279,7 @@ class ARROW_EXPORT Buffer {
   /// The buffer has to be a mutable CPU buffer (`is_cpu()` and `is_mutable()`
   /// are true).  Otherwise, an assertion may be thrown or a null pointer may
   /// be returned.
+  // 返回指向数据的可写指针。必须在 is_mutable_ 为 true 且是 CPU 内存时有效。
   template <typename T>
   T* mutable_data_as() {
     return reinterpret_cast<T*>(mutable_data());
@@ -274,12 +292,14 @@ class ARROW_EXPORT Buffer {
   }
 
   /// \brief Return the device address of the buffer's data
+  // 返回内存的数值地址。无论是否为 CPU 内存都可用，常用于跨设备拷贝。
   uintptr_t address() const { return reinterpret_cast<uintptr_t>(data_); }
 
   /// \brief Return a writable device address to the buffer's data
   ///
   /// The buffer has to be a mutable buffer (`is_mutable()` is true).
   /// Otherwise, an assertion may be thrown or 0 may be returned.
+  // 返回内存的数值地址。无论是否为 CPU 内存都可用，常用于跨设备拷贝。
   uintptr_t mutable_address() const {
 #ifndef NDEBUG
     CheckMutable();
@@ -362,18 +382,26 @@ class ARROW_EXPORT Buffer {
   virtual std::shared_ptr<Device::SyncEvent> device_sync_event() const { return NULLPTR; }
 
  protected:
+  // 标记该 Buffer 是否可写。
   bool is_mutable_;
+  // 标记该 Buffer 是否可直接由 CPU 访问。
   bool is_cpu_;
+  // 指向内存起始位置的原始指针。
   const uint8_t* data_;
+  // 逻辑大小，即当前 Buffer 中有效数据的字节数。
   int64_t size_;
+  // 物理容量，即该 Buffer 总共分配了多少字节（size_ <= capacity_）。
   int64_t capacity_;
+  // 记录分配该 Buffer 的设备类型（如 CPU, CUDA 等）。
   DeviceAllocationType device_type_;
 
   // null by default, but may be set
+  // 如果该 Buffer 是另一个 Buffer 的切片，则指向父 Buffer，用于保持引用计数。
   std::shared_ptr<Buffer> parent_;
 
  private:
   // private so that subclasses are forced to call SetMemoryManager()
+  // 管理该 Buffer 生命周期和设备交互的对象。
   std::shared_ptr<MemoryManager> memory_manager_;
 
  protected:
