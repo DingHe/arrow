@@ -82,6 +82,11 @@ constexpr int64_t kUnknownNullCount = -1;
 /// shared_ptr and can therefore have multiple owners at any given time.
 /// Therefore, mutable access is discouraged except when initially populating
 /// the ArrayData.
+// 如果说 Array 类是提供给用户使用的“精装房”（提供了丰富的类型安全接口），那么 ArrayData 就是“毛坯房”或“建筑结构”。
+// 解耦逻辑与物理：它只负责持有内存缓冲区（Buffers）和基本的元数据（长度、偏移），不提供具体的类型操作接口。
+// 高效的数据操作：由于它结构简单且不具备复杂的继承体系，非常适合在分析引擎内部进行数据操作、IPC（进程间通信）传输以及内存重用。
+// 内存重用：例如，计算一个数组的绝对值时，由于结果的 Null 值位置与输入完全一致，ArrayData 可以直接共享输入的有效性位图（Bitmap）缓冲区，从而避免内存拷贝。
+// 不可变性约定：虽然它本身是 struct 且成员公有，但文档明确指出，一旦被 Array 包装，通常应视为不可变。
 struct ARROW_EXPORT ArrayData {
   ArrayData() = default;
 
@@ -187,6 +192,9 @@ struct ARROW_EXPORT ArrayData {
   }
 
   /// \brief Return a shallow copy of this ArrayData
+  // Copy() 是浅拷贝（共享底层 Buffer）；
+  // CopyTo() 是深拷贝（将 Buffer 移动到指定的内存管理器/设备，如 GPU）
+  // ViewOrCopyTo() 则优先尝试零拷贝视图。
   std::shared_ptr<ArrayData> Copy() const { return std::make_shared<ArrayData>(*this); }
 
   /// \brief Deep copy this ArrayData to destination memory manager
@@ -208,6 +216,7 @@ struct ARROW_EXPORT ArrayData {
   /// \brief Return the null-ness of a given array element
   ///
   /// Calling `IsNull(i)` is the same as `!IsValid(i)`.
+  // 检查第 i 个元素是否为空。它会根据类型（Union, REE, 普通类型）自动判断是查位图还是查子节点。
   bool IsNull(int64_t i) const { return !IsValid(i); }
 
   /// \brief Return the validity of a given array element
@@ -248,6 +257,7 @@ struct ARROW_EXPORT ArrayData {
   /// the data buffer of a boolean array), then `absolute_offset` must be
   /// zero for correct results, and any bit offset must be applied manually
   /// by the caller.
+  // 将第 i 个 Buffer 转换为 T 类型的原始指针，并应用绝对偏移。
   template <typename T>
   inline const T* GetValues(int i, int64_t absolute_offset) const {
     if (buffers[i]) {
@@ -266,6 +276,7 @@ struct ARROW_EXPORT ArrayData {
   /// Calling this method on a bit-packed buffer (such as a validity bitmap, or
   /// the data buffer of a boolean array) will lead to incorrect results.
   /// You should instead call `GetValues(i, 0)` and apply the bit offset manually.
+  // 快捷方式，自动应用 ArrayData 自身的 offset。
   template <typename T>
   inline const T* GetValues(int i) const {
     return GetValues<T>(i, offset);
@@ -278,6 +289,7 @@ struct ARROW_EXPORT ArrayData {
   ///
   /// Like `GetValues(i, absolute_offset)`, but returns nullptr if the given buffer
   /// is not a CPU buffer.
+  // 更安全，如果 Buffer 不在 CPU 上则返回空指针。
   template <typename T>
   inline const T* GetValuesSafe(int i, int64_t absolute_offset) const {
     if (buffers[i] && buffers[i]->is_cpu()) {
@@ -305,6 +317,7 @@ struct ARROW_EXPORT ArrayData {
   /// Like `GetValues(i, absolute_offset)`, but allows mutating buffer contents.
   /// This should only be used when initially populating the ArrayData, before
   /// it is attached to a Array instance.
+  // 返回可写指针。注意：仅应在构建 ArrayData 初期使用。
   template <typename T>
   inline T* GetMutableValues(int i, int64_t absolute_offset) {
     if (buffers[i]) {
@@ -339,6 +352,7 @@ struct ARROW_EXPORT ArrayData {
   /// ArrayData, even if the slice is trivially equal to the original ArrayData.
   /// If you want to reuse the statistics from the original ArrayData, you must
   /// explicitly reattach them.
+  // 创建一个新的 ArrayData 指向同一份 Buffer，但通过调整 offset 和 length 改变逻辑视图。这是零拷贝的。
   std::shared_ptr<ArrayData> Slice(int64_t offset, int64_t length) const;
 
   /// \brief Construct a zero-copy slice of the data with the given offset and length
@@ -355,6 +369,7 @@ struct ARROW_EXPORT ArrayData {
   /// This should only be used when initially populating the ArrayData, if
   /// it possible to compute the null count without visiting the entire validity
   /// bitmap. In most cases, relying on `GetNullCount` is sufficient.
+  // 获取物理 Null 计数。如果未知，则会扫描位图进行计算。
   void SetNullCount(int64_t v) { null_count.store(v); }
 
   /// \brief Return the physical null count
@@ -369,6 +384,7 @@ struct ARROW_EXPORT ArrayData {
   /// Note that this method is typically much faster than calling `IsValid`
   /// for all elements. Therefore, it helps avoid per-element validity bitmap
   /// lookups in the common cases where the array contains zero or only nulls.
+  // 获取物理 Null 计数。如果未知，则会扫描位图进行计算。
   int64_t GetNullCount() const;
 
   /// \brief Return true if the array may have nulls in its validity bitmap
@@ -381,6 +397,7 @@ struct ARROW_EXPORT ArrayData {
   ///
   /// \see HasValidityBitmap
   /// \see MayHaveLogicalNulls
+  // 检查是否有顶级位图且计数非零；
   bool MayHaveNulls() const {
     // If an ArrayData is slightly malformed it may have kUnknownNullCount set
     // but no buffer
@@ -388,6 +405,7 @@ struct ARROW_EXPORT ArrayData {
   }
 
   /// \brief Return true if the array has a validity bitmap
+  // 检查是否有顶级位图且计数非零；
   bool HasValidityBitmap() const { return buffers[0] != NULLPTR; }
 
   /// \brief Return true if the array may have logical nulls
@@ -428,6 +446,7 @@ struct ARROW_EXPORT ArrayData {
   ///       }
   ///       ...
   ///     }
+  // 更进一步，会检查 Union 或 REE 等类型的内部逻辑是否可能包含空值。
   bool MayHaveLogicalNulls() const {
     if (buffers[0] != NULLPTR) {
       return null_count.load() != 0;
@@ -453,6 +472,7 @@ struct ARROW_EXPORT ArrayData {
   /// this function recomputes the null count every time it is called.
   ///
   /// \see GetNullCount
+  // 针对没有顶级位图的复杂类型，实时重算其逻辑空值总数。
   int64_t ComputeLogicalNullCount() const;
 
   /// \brief Return the device_type of the underlying buffers and children
@@ -463,21 +483,30 @@ struct ARROW_EXPORT ArrayData {
   /// this in debug mode.
   ///
   /// \return DeviceAllocationType
+  // 返回数据所在的设备类型（如 CPU 内存或 GPU 显存）
   DeviceAllocationType device_type() const;
-
+  // 描述该数据的逻辑类型（如 Int32, String, Struct 等）
   std::shared_ptr<DataType> type;
+  // 数组包含的元素个数
   int64_t length = 0;
+  // 数组中 Null 值的数量。
+  // 使用 std::atomic 是为了支持多线程下“懒加载”计算。如果值为 -1（kUnknownNullCount），表示尚未计算。
   mutable std::atomic<int64_t> null_count{0};
   // The logical start point into the physical buffers (in values, not bytes).
   // Note that, for child data, this must be *added* to the child data's own offset.
+  // 逻辑起始点在物理缓冲区中的偏移量（以元素为单位，而非字节）。这支持了零拷贝切片。
   int64_t offset = 0;
+  // 物理内存块。通常 buffers[0] 是有效性位图，后续 Buffer 根据 DataType 存放值或偏移量。
   std::vector<std::shared_ptr<Buffer>> buffers;
+  // 用于嵌套类型（如 Struct 或 List）。每个子元素也是一个 ArrayData 对象。
   std::vector<std::shared_ptr<ArrayData>> child_data;
 
   // The dictionary for this Array, if any. Only used for dictionary type
+  // 仅用于字典编码类型（Dictionary-encoded），存储实际的值字典。
   std::shared_ptr<ArrayData> dictionary;
 
   // The statistics for this Array.
+  // 存储该数组的统计信息（如最小值、最大值）。
   std::shared_ptr<ArrayStatistics> statistics;
 };
 
@@ -509,31 +538,48 @@ struct ARROW_EXPORT BufferSpan {
 /// keep alive the referenced objects and memory while the ArraySpan object is in use.
 /// For this reason, this should not be exposed in most public APIs (apart from
 /// compute kernel interfaces).
+// 在 Apache Arrow 项目中，ArraySpan 是一个极其重要的**高性能、非持有型（Non-owning）**数据容器。
+// 它主要用于计算内核（Compute Kernels）内部，旨在消除 shared_ptr 带来的开销。
+// ArraySpan 类似于 C++20 中的 std::span 或 std::string_view，但它是针对 Arrow 数组设计的。
+// 消除引用计数开销：ArrayData 使用 std::shared_ptr 维护 Buffer 和类型，这在高性能循环或频繁调用中会有明显的原子操作开销。ArraySpan 使用原始指针和轻量级结构，拷贝代价极低。
+// 计算内核的标准化输入：它是 Arrow 计算引擎内部处理数据的标准格式。在执行加法、过滤等操作时，数据会被临时转换为 ArraySpan 以获得最高性能。
+// 非持有安全性（Experimental）：它不拥有数据的所有权。这意味着使用 ArraySpan 时，必须确保其引用的原始 ArrayData 或 Buffer 在整个生命周期内不会被释放。
+// 紧凑的内存布局：它将缓冲区固定为 3 个（大多数 Arrow 类型足够用），对于超过 3 个的情况使用特殊处理。
 struct ARROW_EXPORT ArraySpan {
+  // 指向逻辑类型的原始指针（而非 shared_ptr）
   const DataType* type = NULLPTR;
+  // 数组包含的元素个数。
   int64_t length = 0;
+  // 缓存的空值计数。若为 -1 则表示未知。
   mutable int64_t null_count = kUnknownNullCount;
+  // 相对于原始缓冲区的逻辑偏移量。
   int64_t offset = 0;
+  // 这是一个包含 3 个 BufferSpan 的数组。
+  // BufferSpan 结构通常包含原始数据指针 data 和字节大小 size。
+  // buffers[0] 总是有效性位图（Validity Bitmap）
+  // buffers[1] 和 buffers[2] 根据具体类型存放数据（如偏移量 Buffer 或值 Buffer）
   BufferSpan buffers[3];
 
   ArraySpan() = default;
 
   explicit ArraySpan(const DataType* type, int64_t length) : type(type), length(length) {}
-
+  // 将一个有所有权的 ArrayData 转换为非持有的 ArraySpan。这是最常用的转换方式。
   ArraySpan(const ArrayData& data) {  // NOLINT implicit conversion
     SetMembers(data);
   }
   explicit ArraySpan(const Scalar& data) { FillFromScalar(data); }
 
   /// If dictionary-encoded, put dictionary in the first entry
+  // 用于嵌套类型（如 Struct, List）
   std::vector<ArraySpan> child_data;
 
   /// \brief Populate ArraySpan to look like an array of length 1 pointing at
   /// the data members of a Scalar value
+  // 将一个单一的标量值（Scalar）模拟成一个长度为 1 的数组。这在计算内核处理“数组 vs 标量”混合运算时非常有用。
   void FillFromScalar(const Scalar& value);
-
+  // 内部工具函数，用于将 ArrayData 的成员（指针等）提取并填充到 ArraySpan 中。
   void SetMembers(const ArrayData& data);
-
+  // 手动设置特定索引的缓冲区指针。
   void SetBuffer(int index, const std::shared_ptr<Buffer>& buffer) {
     this->buffers[index].data = const_cast<uint8_t*>(buffer->data());
     this->buffers[index].size = buffer->size();
@@ -547,11 +593,12 @@ struct ARROW_EXPORT ArraySpan {
   int num_buffers() const;
 
   // Access a buffer's data as a typed C pointer
+  // 获取第 i 个缓冲区的类型化原始指针。
   template <typename T>
   inline T* GetValues(int i, int64_t absolute_offset) {
     return reinterpret_cast<T*>(buffers[i].data) + absolute_offset;
   }
-
+  // 如果不传 absolute_offset，它会自动应用 ArraySpan 自身的 offset。
   template <typename T>
   inline T* GetValues(int i) {
     return GetValues<T>(i, this->offset);
@@ -576,6 +623,7 @@ struct ARROW_EXPORT ArraySpan {
   /// \pre length <= the length of the buffer (in number of values) that's expected for
   /// this array type
   /// \return A span<const T> of the requested length
+  // 返回一个 util::span<T>，提供一种更安全、带边界检查的连续内存访问方式。
   template <typename T>
   util::span<const T> GetSpan(int i, int64_t length) const {
     const int64_t buffer_length = buffers[i].size / static_cast<int64_t>(sizeof(T));
@@ -599,9 +647,9 @@ struct ARROW_EXPORT ArraySpan {
     ARROW_UNUSED(buffer_length);
     return util::span<T>(buffers[i].mutable_data_as<T>() + this->offset, length);
   }
-
+  // 判断第 i 个元素是否为空。
   inline bool IsNull(int64_t i) const { return !IsValid(i); }
-
+  // 判断第 i 个元素是否为空。
   inline bool IsValid(int64_t i) const {
     if (this->buffers[0].data != NULLPTR) {
       return bit_util::GetBit(this->buffers[0].data, i + this->offset);
@@ -619,7 +667,7 @@ struct ARROW_EXPORT ArraySpan {
       return this->null_count != this->length;
     }
   }
-
+  // 将 ArraySpan 转换回具有所有权的 ArrayData 或 Array 对象。这通常涉及创建新的 shared_ptr。
   std::shared_ptr<ArrayData> ToArrayData() const;
 
   std::shared_ptr<Array> ToArray() const;
@@ -635,7 +683,8 @@ struct ARROW_EXPORT ArraySpan {
       return NULLPTR;
     }
   }
-
+  // 对 ArraySpan 进行切片操作。
+  // 这仅仅是修改了 offset 和 length 指标，不涉及任何内存拷贝。
   void SetSlice(int64_t offset, int64_t length) {
     this->offset = offset;
     this->length = length;
@@ -649,6 +698,7 @@ struct ARROW_EXPORT ArraySpan {
   }
 
   /// \brief Return physical null count, or compute and set it if it's not known
+  // 获取物理空值计数。如果缓存为 -1，则即时扫描位图并更新缓存。
   int64_t GetNullCount() const;
 
   /// \brief Return true if the array has a validity bitmap and the physical null
@@ -660,6 +710,7 @@ struct ARROW_EXPORT ArraySpan {
   ///
   /// \see HasValidityBitmap
   /// \see MayHaveLogicalNulls
+  // 快速判断是否可能存在空值。如果 null_count == 0 则一定没空值。
   bool MayHaveNulls() const {
     // If an ArrayData is slightly malformed it may have kUnknownNullCount set
     // but no buffer
@@ -674,6 +725,7 @@ struct ARROW_EXPORT ArraySpan {
   /// nulls, or if the dictionary of dictionay array may have nulls.
   ///
   /// \see ArrayData::MayHaveLogicalNulls
+  // 深度检查。对于没有位图但可能有逻辑空值（如 Union 类型的子项有空值）的情况进行判断。
   bool MayHaveLogicalNulls() const {
     if (buffers[0].data != NULLPTR) {
       return null_count != 0;
@@ -700,6 +752,7 @@ struct ARROW_EXPORT ArraySpan {
   /// recompute the logical null count every time it is called.
   ///
   /// \see GetNullCount
+  // 强制重新计算逻辑空值数量，不依赖缓存。
   int64_t ComputeLogicalNullCount() const;
 
   /// Some DataTypes (StringView, BinaryView) may have an arbitrary number of variadic
@@ -709,6 +762,7 @@ struct ARROW_EXPORT ArraySpan {
   /// sizeof(shared_ptr<Buffer>).
   ///
   /// \see HasVariadicBuffers
+  // 支持 StringView 或 BinaryView 等可能拥有任意数量缓冲区的类型。
   util::span<const std::shared_ptr<Buffer>> GetVariadicBuffers() const;
   bool HasVariadicBuffers() const;
 
