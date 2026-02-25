@@ -73,6 +73,7 @@ using internal::kArrowMagicBytes;
 
 namespace {
 
+// 用于检测给定的 ArrayData（Arrow 数据的底层结构）中是否包含**字典编码（Dictionary Encoding）**类型的数据。
 bool HasNestedDict(const ArrayData& data) {
   if (data.type->id() == Type::DICTIONARY) {
     return true;
@@ -84,17 +85,27 @@ bool HasNestedDict(const ArrayData& data) {
   }
   return false;
 }
-
+// 当一个数组被切片（Slice）时，它的位图往往还是指向原始的大内存块，只是带有一个 offset。
+// 在进行 IPC 传输或写入文件时，为了节省空间和保证对齐，需要根据实际的 offset 和 length 截取位图。
+// 接收偏移量 offset、长度 length（以位为单位）、输入缓冲区 input（即原始位图）、内存池 pool 以及输出缓冲区的指针 buffer。
 Status GetTruncatedBitmap(int64_t offset, int64_t length,
                           const std::shared_ptr<Buffer>& input, MemoryPool* pool,
                           std::shared_ptr<Buffer>* buffer) {
+  // 如果输入位图为空（意味着该数组所有值都有效，或者该类型不带位图），则直接将输出指向空，返回成功。
   if (!input) {
     *buffer = input;
     return Status::OK();
   }
+  // 计算目标长度
+  // 将位长度转换为字节长度（向上取整，例如 9 位需要 2 字节）。
+  // 将字节数补齐到 Arrow 要求的对齐长度（通常是 8 或 64 字节的倍数）。这是为了确保生成的 IPC 消息符合内存对齐规范。
   int64_t min_length = PaddedLength(bit_util::BytesForBits(length));
+  // 在以下两种情况下，不能直接重用原始 Buffer：
+  // offset != 0：数组是切片得来的，数据的起点不在位图的第一个 bit，必须通过位移拷贝来对齐。
+  // min_length < input->size()：原始位图太大（后面有冗余数据），为了压缩传输体积，需要截断。
   if (offset != 0 || min_length < input->size()) {
     // With a sliced array / non-zero offset, we must copy the bitmap
+    // 执行位图拷贝与重对齐
     ARROW_ASSIGN_OR_RAISE(*buffer, CopyBitmap(pool, input->data(), offset, length));
   } else {
     *buffer = input;
@@ -102,6 +113,15 @@ Status GetTruncatedBitmap(int64_t offset, int64_t length,
   return Status::OK();
 }
 
+// 作用是处理数值型数据缓冲区（如整数、浮点数数组）。
+// 与之前处理位图（Bitmap）的函数不同，这个函数处理的是以字节为单位对齐的数据。
+// 其核心目的是：当一个数组被切片（Slice）后，确保在导出数据时，只引用或截取实际被使用的那部分内存。
+// offset：切片的起始位置（元素个数）。
+// length：切片的长度（元素个数）。
+// byte_width：每个元素占用的字节宽度（例如 Int32 是 4，Double 是 8）。
+// input：原始的内存缓冲区。
+// pool：内存池（虽然此函数目前主要使用 SliceBuffer 进行逻辑切片，不一定立刻分配新内存）。
+// buffer：输出缓冲区的指针。
 Status GetTruncatedBuffer(int64_t offset, int64_t length, int32_t byte_width,
                           const std::shared_ptr<Buffer>& input, MemoryPool* pool,
                           std::shared_ptr<Buffer>* buffer) {
@@ -118,7 +138,7 @@ Status GetTruncatedBuffer(int64_t offset, int64_t length, int32_t byte_width,
   }
   return Status::OK();
 }
-
+// 判断缓冲区是否要截图
 static inline bool NeedTruncate(int64_t offset, const Buffer* buffer,
                                 int64_t min_length) {
   // buffer can be NULL
@@ -127,7 +147,13 @@ static inline bool NeedTruncate(int64_t offset, const Buffer* buffer,
   }
   return offset != 0 || min_length < buffer->size();
 }
-
+// 负责将内存中的 RecordBatch（记录批次）及其包含的各种类型的 Array（数组）序列化为符合 Arrow IPC（进程间通信）协议 的二进制格式。
+// 该类的主要作用是将结构化的内存数据“打平”并转换为线性载荷（Payload）。
+// 深度优先遍历：通过递归访问 RecordBatch 中的每一列及其嵌套子字段（如 Struct、List 的子项）。
+// Buffer 管理：提取每个数组的有效性位图（Validity Bitmap）、偏移缓冲（Offsets）和原始数据缓冲（Data），并放入待发送的缓冲区队列。
+// 内存截断与对齐：对于切片（Slice）过的数组，计算其实际需要的最小内存范围，并确保所有缓冲区符合 8 字节对齐。
+// 可选压缩：如果配置了压缩方案（如 LZ4/ZSTD），负责对这些缓冲区进行并行压缩。
+// 生成元数据：计算每个缓冲区在最终消息体中的偏移量和长度，并构建符合 Flatbuffers 定义的消息头。
 class RecordBatchSerializer {
  public:
   RecordBatchSerializer(int64_t buffer_start_offset,
@@ -142,43 +168,61 @@ class RecordBatchSerializer {
   }
 
   virtual ~RecordBatchSerializer() = default;
-
+  // 提取数组的通用元数据（长度、空值数）以及处理“有效位图”（Validity Bitmap），然后将特定类型的处理交给 VisitType
   Status VisitArray(const Array& arr) {
+    // 定义一个全局静态的空 Buffer 对象。
+    // 当数组没有空值（null_count == 0）或者不需要位图时，用这个占位符填充 body_buffers 列表，以保持 Buffer 索引的正确性，同时避免分配实际内存。
     static std::shared_ptr<Buffer> kNullBuffer = std::make_shared<Buffer>(nullptr, 0);
-
+    // 防止深层嵌套类型（如嵌套了 1000 层的 List<Struct<List<...>>>）导致栈溢出。每进入一层 VisitArray，这个计数器通常会递减。
     if (max_recursion_depth_ <= 0) {
       return Status::Invalid("Max recursion depth reached");
     }
-
+    // 安全性检查。Arrow 协议的某些版本或配置仅支持 32 位整数范围内的数组长度。如果数组元素超过 21 亿个且未开启 64 位支持，则报错。
     if (!options_.allow_64bit && arr.length() > std::numeric_limits<int32_t>::max()) {
       return Status::CapacityError("Cannot write arrays larger than 2^31 - 1 in length");
     }
-
+    // 这是一个针对异构设备（如 GPU）的特殊处理。
+    // 如果数组是经过切片（Slice）的且不在 CPU 上，计算其确切的空值数量（null count）可能需要昂贵的跨设备内存访问。目前 Arrow 尚未实现此场景下的自动处理。
     if (arr.offset() != 0 && arr.device_type() != DeviceAllocationType::kCPU) {
       // https://github.com/apache/arrow/issues/43029
       return Status::NotImplemented("Cannot compute null count for non-cpu sliced array");
     }
 
     // push back all common elements
+    // 在元数据中记录当前数组的基础信息：
+    // arr.length(): 数组包含多少个元素。
+    // arr.null_count(): 数组中有多少个空值。
     field_nodes_.push_back({arr.length(), arr.null_count(), 0});
 
     // In V4, null types have no validity bitmap
     // In V5 and later, null and union types have no validity bitmap
+    // 根据 Arrow 协议版本和数据类型，判断该类型是否应该拥有有效位图。例如，NullType 或某些版本的 UnionType 是没有位图的。
     if (internal::HasValidityBitmap(arr.type_id(), options_.metadata_version)) {
       if (arr.null_count() > 0) {
+        // 如果数组确实包含 Null 值，调用 GetTruncatedBitmap
         std::shared_ptr<Buffer> bitmap;
         RETURN_NOT_OK(GetTruncatedBitmap(arr.offset(), arr.length(), arr.null_bitmap(),
                                          options_.memory_pool, &bitmap));
         out_->body_buffers.emplace_back(std::move(bitmap));
       } else {
         // Push a dummy zero-length buffer, not to be copied
+        // 无空值，使用占位符
         out_->body_buffers.emplace_back(kNullBuffer);
       }
     }
+    // 通用部分（长度、位图）处理完了，接下来调用 VisitType
     return VisitType(arr);
   }
 
   // Override this for writing dictionary metadata
+  // SerializeMetadata 是序列化流程的收官之作。
+  // 它的核心职责是：利用之前所有 Visit 方法收集到的零散信息（如偏移量、长度、节点信息），通过 Flatbuffers 库生成符合 Arrow IPC 标准的“元数据头（Metadata Header）”。
+  // num_rows: 传入当前 RecordBatch 的总行数。
+  // 在 Arrow 的 IPC 协议中，消息是封装好的（Encapsulated）
+  // Metadata Size (int32): 首先写入一个 4 字节整数，表示 Header 的长度。
+  // Metadata Header: 这就是 SerializeMetadata 生成的内容，使用 Flatbuffers 格式，描述了 Body 的布局。
+  // Body: 紧随其后的是 body_buffers 中的实际原始数据。
+  // SerializeMetadata 不处理实际的列数据，它只负责编写**“说明书”**。没有这个说明书，接收方就无法知道 body_buffers 里面那一大块二进制数据哪里是第一列，哪里是第二列，或者哪里是空值位图。
   virtual Status SerializeMetadata(int64_t num_rows) {
     return WriteRecordBatchMessage(num_rows, out_->body_length, custom_metadata_,
                                    field_nodes_, buffer_meta_, variadic_counts_, options_,
@@ -250,8 +294,11 @@ class RecordBatchSerializer {
     return ::arrow::internal::OptionalParallelFor(
         options_.use_threads, static_cast<int>(out_->body_buffers.size()), CompressOne);
   }
-
+  // 序列化的总入口
+  // 核心任务是将内存中的 RecordBatch（行批次数据）转换为符合 Arrow IPC（进程间通信）协议的二进制格式。
+  // 负责提取缓冲区（Buffer）、计算元数据偏移量、处理压缩以及准备 Header
   Status Assemble(const RecordBatch& batch) {
+    // 如果当前序列化器之前被使用过，清空缓存的状态
     if (!field_nodes_.empty()) {
       field_nodes_.clear();
       buffer_meta_.clear();
@@ -259,19 +306,24 @@ class RecordBatchSerializer {
     }
 
     // Perform depth-first traversal of the row-batch
+    // 遍历 RecordBatch 中的每一列
+    // VisitArray 是一个关键的递归函数，它会根据数组类型（如 List, Struct, Primitive 等）通过深度优先搜索提取出所有的底层 Buffer（如有效位图 Buffer、数据 Buffer、偏移量 Buffer），
+    // 并存入 out_->body_buffers。
     for (int i = 0; i < batch.num_columns(); ++i) {
       RETURN_NOT_OK(VisitArray(*batch.column(i)));
     }
 
     // calculate initial body length using all buffer sizes
     int64_t raw_size = 0;
+    // 统计所有提取出来的 Buffer 的原始字节总数，并记录在 raw_body_length 中。这通常用于在压缩前了解原始数据大小。
     for (const auto& buf : out_->body_buffers) {
       if (buf) {
         raw_size += buf->size();
       }
     }
     out_->raw_body_length = raw_size;
-
+    // 如果配置了压缩器（Codec），则调用 CompressBodyBuffers
+    // 根据 min_space_savings（最小节约空间比例）决定是否真的执行压缩。如果压缩后的效果不理想，可能会保持原样
     if (options_.codec != nullptr) {
       if (options_.min_space_savings) {
         double percentage = *options_.min_space_savings;
@@ -291,6 +343,8 @@ class RecordBatchSerializer {
     buffer_meta_.reserve(out_->body_buffers.size());
 
     // Construct the buffer metadata for the record batch header
+    // 构建 IPC 消息的关键步骤。Arrow 协议要求消息 Body 中的每个 Buffer 都必须是 8 字节对齐的。
+    // 代码计算每个 Buffer 的 offset，并根据对齐要求计算 padding。即使 Buffer 长度不是 8 的倍数，下一个 Buffer 也会从 8 倍数的位置开始。
     for (const auto& buffer : out_->body_buffers) {
       int64_t size = 0;
       int64_t padding = 0;
@@ -298,15 +352,17 @@ class RecordBatchSerializer {
       // The buffer might be null if we are handling zero row lengths.
       if (buffer) {
         size = buffer->size();
+        // Arrow 协议要求 Buffer 必须按 8 字节对齐
         padding = bit_util::RoundUpToMultipleOf8(size) - size;
       }
-
+      // 记录当前 Buffer 在 Body 中的相对起始位置和长度
       buffer_meta_.push_back({offset, size});
+      // 移动偏移量，包含数据长度和为了对齐而补充的填充字节
       offset += size + padding;
     }
-
+    // 处理某些特殊类型（如包含多个数据 Buffer 的 StringView）的计数。
     variadic_counts_ = out_->variadic_buffer_counts;
-
+    // 计算整个消息体（Body）的总长度
     out_->body_length = offset - buffer_start_offset_;
     DCHECK(bit_util::IsMultipleOf8(out_->body_length));
 
@@ -315,6 +371,7 @@ class RecordBatchSerializer {
     //
     // Note: The memory written here is prefixed by the size of the flatbuffer
     // itself as an int32_t.
+    // // 将计算好的偏移量、字段信息等转换成 Flatbuffers 格式写出
     return SerializeMetadata(batch.num_rows());
   }
 
@@ -428,11 +485,16 @@ class RecordBatchSerializer {
     *out_value_sizes = std::move(sizes);
     return Status::OK();
   }
-
+  // 处理 布尔类型数组（BooleanArray） 的 Visit 函数。在 Arrow 协议中，布尔数组是一个特例，因为它使用 位（bit） 而不是字节（byte）来存储数据。
   Status Visit(const BooleanArray& array) {
+    // 声明一个指向 Buffer 的智能指针。
+    // 这里的 data 存放的是布尔值本身（True/False），而不是之前在 VisitArray 里处理的空值位图（Validity Bitmap）
     std::shared_ptr<Buffer> data;
+    // array.values()：获取布尔数组存储实际数据的 Buffer。在 Arrow 中，布尔值是按位压缩的（1 个 bit 代表 1 个布尔值）
+    // array.offset() 和 array.length()：如果这个数组是一个切片（Slice），它可能指向原始大缓冲区的中间部分
     RETURN_NOT_OK(GetTruncatedBitmap(array.offset(), array.length(), array.values(),
                                      options_.memory_pool, &data));
+    // 将处理好的布尔数据 Buffer 放入 body_buffers 队列中。
     out_->body_buffers.emplace_back(std::move(data));
     return Status::OK();
   }
@@ -719,21 +781,26 @@ class RecordBatchSerializer {
   }
 
   Status Visit(const ExtensionArray& array) { return VisitType(*array.storage()); }
-
+  // VisitArrayInline 代码在 cpp/src/arrow/visit_array_inline.h
+  // VisitArrayInline本质就是宏展开，调用对应子类的Visit方法
   Status VisitType(const Array& values) { return VisitArrayInline(values, this); }
 
  protected:
   // Destination for output buffers
+  // 序列化的输出容器。它会收集所有的二进制缓冲区（body_buffers）和最终生成的元数据。
   IpcPayload* out_;
-
+  // 与当前 RecordBatch 关联的用户自定义键值对元数据。
   std::shared_ptr<const KeyValueMetadata> custom_metadata_;
-
+  // 存储每个字段的元数据（长度、空值计数等），用于构建 IPC 消息头。
   std::vector<internal::FieldMetadata> field_nodes_;
+  // 记录每个数据块（Buffer）在消息体中的相对偏移量和实际长度。
   std::vector<internal::BufferMetadata> buffer_meta_;
   std::vector<int64_t> variadic_counts_;
-
+  // 序列化配置（包括元数据版本、内存池、是否启用线程、压缩算法等）。
   const IpcWriteOptions& options_;
+  // 防御性属性，防止因过深的嵌套类型导致栈溢出。
   int64_t max_recursion_depth_;
+  // 初始偏移量，通常为 0，用于多级流式写入时计算绝对位置。
   int64_t buffer_start_offset_;
 };
 

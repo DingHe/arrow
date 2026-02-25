@@ -44,20 +44,33 @@ struct IpcPayload;
 
 using RecordBatchReader = ::arrow::RecordBatchReader;
 
+// ReadStats 是一个简单的结构体（POD），专门用于记录在处理 Arrow IPC（进程间通信）流或文件读取过程中的统计信息。
+// ReadStats 的主要作用是监控和审计 IPC 解码过程。
+// 由于 Arrow 数据不仅包含普通的“数据记录批次（Record Batches）”，还可能包含“字典批次（Dictionary Batches）”，尤其是在处理带有字典编码（Dictionary Encoding）的数据流时。ReadStats 提供了对流中不同类型消息计数的透明度。
 struct ReadStats {
   /// Number of IPC messages read.
+  // 读取到的 IPC 消息总数。
+  // 在 Arrow IPC 协议中，所有的内容（Schema、Dictionary Batch、Record Batch）都被包装在“消息（Message）”中。这个指标是所有读取到的消息的累加，是衡量流活跃度的基本指标。
   int64_t num_messages = 0;
   /// Number of record batches read.
+  // 读取到的记录批次（Record Batch）数量。
+  // 这是用户最关心的数据指标，代表了包含实际业务数据的批次数量。通常 RecordBatchReader 每成功产生一个 RecordBatch 对象，该值就会加 1。
   int64_t num_record_batches = 0;
   /// Number of dictionary batches read.
   ///
   /// Note: num_dictionary_batches >= num_dictionary_deltas + num_replaced_dictionaries
+  // 读取到的字典批次（Dictionary Batch）总数
+  // 当某一列使用字典编码时，流中会包含专门定义或更新字典的消息。
   int64_t num_dictionary_batches = 0;
 
   /// Number of dictionary deltas read.
+  // 读取到的字典增量（Dictionary Deltas）数量。
+  // 在长流传输中，为了节省空间，系统可能只发送字典中新增的部分（Delta）。该指标记录了这种“增量更新”发生的次数。
   int64_t num_dictionary_deltas = 0;
   /// Number of replaced dictionaries (i.e. where a dictionary batch replaces
   /// an existing dictionary with an unrelated new dictionary).
+  // 读取到的字典替换（Replaced Dictionaries）数量。
+  // 当一个字典批次发送了全新的数据，并要求丢弃旧字典改用新字典时，记为一次替换。这通常发生在数据分布发生剧烈变化，导致旧字典不再适用时。
   int64_t num_replaced_dictionaries = 0;
 };
 
@@ -66,6 +79,12 @@ struct ReadStats {
 /// This class reads the schema (plus any dictionaries) as the first messages
 /// in the stream, followed by record batches. For more granular zero-copy
 /// reads see the ReadRecordBatch functions
+// 在 Apache Arrow 项目中，RecordBatchStreamReader 是处理 Arrow IPC 流格式（Streaming Format） 的核心类。它继承自 RecordBatchReader，专门用于从连续的字节流中同步读取数据。
+// 该类的主要作用是解析 Arrow 流式协议。
+// Arrow 的 IPC 协议分为两种主要格式：文件格式（File Format）和流格式（Stream Format）。RecordBatchStreamReader 负责处理后者。
+// 顺序解析：流格式是专为单次遍历设计的。它假设数据是顺序到达的（例如通过 TCP 网络连接或管道）。
+// 自描述性：它首先从流中读取 Schema（模式）和 DictionaryBatches（字典块），建立元数据上下文，然后按顺序读取一个或多个 RecordBatches。
+// 同步读取：它提供同步接口，调用者在请求下一个批次时会阻塞，直到流中有足够的数据被解码。
 class ARROW_EXPORT RecordBatchStreamReader : public RecordBatchReader {
  public:
   /// Create batch reader from generic MessageReader.
@@ -74,6 +93,11 @@ class ARROW_EXPORT RecordBatchStreamReader : public RecordBatchReader {
   /// \param[in] message_reader a MessageReader implementation
   /// \param[in] options any IPC reading options (optional)
   /// \return the created batch reader
+  // Open 方法有三个重载版本，用于从不同的数据源初始化读取器：
+  // 从一个底层的 MessageReader 创建读取器。
+  // 这是最底层的构造方式。
+  // MessageReader 负责将原始字节封装成 Arrow 的 Message 对象（如 Schema 消息或 RecordBatch 消息）。
+  // 该方法会接管 message_reader 的所有权。
   static Result<std::shared_ptr<RecordBatchStreamReader>> Open(
       std::unique_ptr<MessageReader> message_reader,
       const IpcReadOptions& options = IpcReadOptions::Defaults());
@@ -84,6 +108,8 @@ class ARROW_EXPORT RecordBatchStreamReader : public RecordBatchReader {
   /// lifetime of stream reader
   /// \param[in] options any IPC reading options (optional)
   /// \return the created batch reader
+  // 直接从一个原始的输入流指针创建读取器。
+  // 适用于流的生命周期由外部管理的情况。注意：调用者必须确保 stream 在 RecordBatchStreamReader 存活期间不被销毁。
   static Result<std::shared_ptr<RecordBatchStreamReader>> Open(
       io::InputStream* stream,
       const IpcReadOptions& options = IpcReadOptions::Defaults());
@@ -92,6 +118,8 @@ class ARROW_EXPORT RecordBatchStreamReader : public RecordBatchReader {
   /// \param[in] stream the input stream
   /// \param[in] options any IPC reading options (optional)
   /// \return the created batch reader
+  // 从共享指针形式的输入流创建读取器。
+  // 这是最常用的版本。它会增加 stream 的引用计数，从而确保底层流对象的生命周期与读取器绑定。
   static Result<std::shared_ptr<RecordBatchStreamReader>> Open(
       const std::shared_ptr<io::InputStream>& stream,
       const IpcReadOptions& options = IpcReadOptions::Defaults());
@@ -101,6 +129,20 @@ class ARROW_EXPORT RecordBatchStreamReader : public RecordBatchReader {
 };
 
 /// \brief Reads the record batch file format
+// 在 Apache Arrow 项目中，RecordBatchFileReader 是处理 Arrow IPC 文件格式（File Format / Random Access Format） 的核心类。
+// 与流式格式不同，文件格式支持随机访问，允许用户直接跳到文件的任何部分读取特定的数据块。
+// RecordBatchFileReader 的设计目标是高效地管理和读取存储在磁盘或内存映射文件中的 Arrow 数据。
+// 随机访问（Random Access）：这是它与 RecordBatchStreamReader 最大的区别。通过读取位于文件末尾的“页脚”（Footer），它能获取所有数据块的偏移量，从而实现对任意一个 RecordBatch 的 $O(1)$ 级别定位。
+// 零拷贝读取（Zero-copy）：如果底层使用的是内存映射文件（Memory Mapped File），该类可以直接返回指向磁盘缓冲区的指针，而无需将数据拷贝到用户态内存。
+// 自包含元数据：它负责解析文件的 Schema、字典信息以及自定义的键值对元数据。
+// 异步与并发支持：提供了异步打开和预缓冲（Pre-buffering）功能，显著提升在高延迟存储（如云存储）上的性能。
+// 文件格式逻辑布局示意
+//Header: ARROW1 幻数。
+//Data Blocks: 连续存储的多个 RecordBatch 和 DictionaryBatch。
+// Footer: 包含所有数据块的偏移量和长度。包含 Schema。
+// Footer Length: 4 字节，记录 Footer 的大小。
+// Magic Number: ARROW1（6 字节）。
+
 class ARROW_EXPORT RecordBatchFileReader
     : public std::enable_shared_from_this<RecordBatchFileReader> {
  public:
@@ -244,6 +286,12 @@ class ARROW_EXPORT RecordBatchFileReader
 /// This API is EXPERIMENTAL.
 ///
 /// \since 0.17.0
+// 在 Apache Arrow 项目中，Listener 类是用于异步流式解析的一个核心接口。
+// 它通常与 StreamDecoder（流式解码器）配合使用，采用的是一种典型的回调（Callback）机制。
+// Listener 的核心作用是作为事件接收器，处理在解析 Arrow IPC（进程间通信）流过程中产生的各种对象。
+// 异步解耦：与传统的 RecordBatchStreamReader（主动拉取数据）不同，Listener 允许你在数据到达并解析完成后，让解码器“通知”你。这在反应式编程或基于事件的网络通信中非常有用。
+// 按序处理：当底层的 StreamDecoder 接收到字节流并识别出元数据或数据块时，它会自动调用 Listener 中相应的虚函数。
+// 扩展性：用户通过继承 Listener 并重写（Override）感兴趣的方法，可以自定义数据到达后的逻辑（例如：直接存入数据库、进行实时计算或更新 UI）。
 class ARROW_EXPORT Listener {
  public:
   virtual ~Listener() = default;
@@ -255,6 +303,7 @@ class ARROW_EXPORT Listener {
   /// \return Status
   ///
   /// \see StreamDecoder
+  // 当接收到“流结束”（End-of-Stream, EOS）信号时被调用。
   virtual Status OnEOS();
 
   /// \brief Called when a record batch is decoded and
@@ -267,6 +316,7 @@ class ARROW_EXPORT Listener {
   /// \return Status
   ///
   /// \see StreamDecoder
+  // 当一个通用的数据批次解码完成时被调用。
   virtual Status OnRecordBatchDecoded(std::shared_ptr<RecordBatch> record_batch);
 
   /// \brief Called when a record batch with custom metadata is decoded.
@@ -281,6 +331,7 @@ class ARROW_EXPORT Listener {
   /// \see StreamDecoder
   ///
   /// \since 13.0.0
+  // 处理带有自定义元数据（Custom Metadata）的数据批次。
   virtual Status OnRecordBatchWithMetadataDecoded(
       RecordBatchWithMetadata record_batch_with_metadata);
 
@@ -292,6 +343,7 @@ class ARROW_EXPORT Listener {
   /// \return Status
   ///
   /// \see StreamDecoder
+  // 当流中的模式信息（表结构）解析完成时被调用。
   virtual Status OnSchemaDecoded(std::shared_ptr<Schema> schema);
 
   /// \brief Called when a schema is decoded.
@@ -306,6 +358,7 @@ class ARROW_EXPORT Listener {
   /// \see StreamDecoder
   ///
   /// \since 13.0.0
+  // 处理包含过滤后的模式的情况。
   virtual Status OnSchemaDecoded(std::shared_ptr<Schema> schema,
                                  std::shared_ptr<Schema> filtered_schema);
 };

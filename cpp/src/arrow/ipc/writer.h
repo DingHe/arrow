@@ -53,12 +53,26 @@ namespace ipc {
 
 /// \brief Intermediate data structure with metadata header, and zero
 /// or more buffers for the message body.
+// Apache Arrow 中用于封装 IPC（进程间通信）消息的中间结构体。
+// 你可以把它想象成一个待寄出的包裹：metadata 是贴在包裹外的详情单（Header），而 body_buffers 是包裹里实际装的货物（数据）。
 struct IpcPayload {
+  // 标识消息的类型。
+  // 常见值：SCHEMA（传递架构信息）、RECORD_BATCH（传递实际数据）、DICTIONARY_BATCH（传递字典编码数据）
   MessageType type = MessageType::NONE;
+  // 存储序列化后的 Flatbuffers 元数据。
   std::shared_ptr<Buffer> metadata;
+  // 存储该消息体（Body）包含的所有原始数据块（Buffers）
+  // 包括 Validity Bitmaps（有效位图）、Offsets（偏移量数组）、Data（实际数值）
   std::vector<std::shared_ptr<Buffer>> body_buffers;
+  // 记录可变数量缓冲区的计数
+  // 背景：这是为了支持像 StringView（二进制视图）这种特殊类型。
+  // 传统的 Arrow 类型通常有固定数量的 Buffer（如 2 到 3 个），而 StringView 可能引用了多个变长的数据 Buffer，该字段用于记录这些动态增加的 Buffer 数量。
   std::vector<int64_t> variadic_buffer_counts;
+  // 序列化后消息体的最终长度。
+  // 包含为了 8 字节对齐而添加的 Padding（填充字节）
+  // 如果开启了压缩，这是压缩后的总字节数
   int64_t body_length = 0;      // serialized body length (padded, maybe compressed)
+  // 消息体原始的、未压缩的字节总长度
   int64_t raw_body_length = 0;  // initial uncompressed body length
 };
 
@@ -87,6 +101,14 @@ struct WriteStats {
 
 /// \class RecordBatchWriter
 /// \brief Abstract interface for writing a stream of record batches
+// 在 Apache Arrow 项目中，RecordBatchWriter 是将内存中的列式数据持久化或传输的核心抽象接口。
+// RecordBatchWriter 的主要作用是定义一套统一的序列化协议接口，用于将 Arrow 格式的数据写入目标介质。
+// 流式输出：它允许用户逐个 RecordBatch 地写入数据，而不是要求一次性提供所有数据。这在处理超大规模数据集（超过内存限制）时至关重要。
+// 格式抽象：它是多种具体实现类的基类。例如：
+// RecordBatchStreamWriter：用于写入 Arrow 流格式（适用于网络传输）。
+// RecordBatchFileWriter：用于写入 Arrow 文件格式（适用于磁盘存储，带页脚索引）。
+// 解耦计算与存储：上层逻辑只需要操作 WriteRecordBatch，而不需要关心底层是写到了本地文件、S3 云存储，还是网络套接字。
+
 class ARROW_EXPORT RecordBatchWriter {
  public:
   virtual ~RecordBatchWriter();
@@ -95,6 +117,8 @@ class ARROW_EXPORT RecordBatchWriter {
   ///
   /// \param[in] batch the record batch to write to the stream
   /// \return Status
+  // 将一个 RecordBatch 写入输出流。
+  // 说明：这是子类必须实现的核心逻辑。它会将内存中的列数组转换为 Arrow IPC 协议定义的二进制格式。
   virtual Status WriteRecordBatch(const RecordBatch& batch) = 0;
 
   /// \brief Write a record batch with custom metadata to the stream
@@ -102,6 +126,8 @@ class ARROW_EXPORT RecordBatchWriter {
   /// \param[in] batch the record batch to write to the stream
   /// \param[in] custom_metadata the record batch's custom metadata to write to the stream
   /// \return Status
+  // 作用：写入数据批次的同时，附带针对该批次的自定义元数据。
+  // 说明：默认实现通常会忽略元数据并直接调用上面的版本。但在高级应用中，这可以用来在特定批次上附加业务标签（如时间戳、分片 ID）。
   virtual Status WriteRecordBatch(
       const RecordBatch& batch,
       const std::shared_ptr<const KeyValueMetadata>& custom_metadata);
@@ -109,6 +135,8 @@ class ARROW_EXPORT RecordBatchWriter {
   /// \brief Write possibly-chunked table by creating sequence of record batches
   /// \param[in] table table to write
   /// \return Status
+  // 作用：将一个完整的 Table 对象写入流。
+  // 说明：Table 内部通常由多个分块（Chunks）组成。此方法会自动将 Table 拆解为多个 RecordBatch 并依次调用 WriteRecordBatch。
   Status WriteTable(const Table& table);
 
   /// \brief Write Table with a particular chunksize
