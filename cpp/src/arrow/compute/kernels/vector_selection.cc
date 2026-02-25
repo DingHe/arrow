@@ -334,6 +334,7 @@ void RegisterVectorSelection(FunctionRegistry* registry) {
   DCHECK_OK(registry->AddFunction(MakeFilterMetaFunction()));
 
   // Take kernels
+
   std::vector<SelectionKernelData> take_kernels;
   PopulateTakeKernels(&take_kernels);
 
