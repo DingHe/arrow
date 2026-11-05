@@ -42,6 +42,8 @@ namespace sql {
 /// @{
 
 /// \brief A SQL query.
+// 封装一条 SQL 查询。
+// query（UTF-8 编码的 SQL 语句文本），transaction_id（关联的事务 ID，若未指定则为空字符串）。
 struct ARROW_FLIGHT_SQL_EXPORT StatementQuery {
   /// \brief The SQL query.
   std::string query;
@@ -50,6 +52,8 @@ struct ARROW_FLIGHT_SQL_EXPORT StatementQuery {
 };
 
 /// \brief A Substrait plan to execute.
+// 封装一个需要执行的 Substrait 序列化查询计划。
+// plan（Substrait 计划对象），transaction_id（关联的事务 ID）。
 struct ARROW_FLIGHT_SQL_EXPORT StatementSubstraitPlan {
   /// \brief The Substrait plan.
   SubstraitPlan plan;
@@ -58,6 +62,8 @@ struct ARROW_FLIGHT_SQL_EXPORT StatementSubstraitPlan {
 };
 
 /// \brief A SQL update query.
+// 封装一条 SQL 更新语句（DML/DDL）。
+// query（SQL 更新语句），transaction_id（关联的事务 ID）。
 struct ARROW_FLIGHT_SQL_EXPORT StatementUpdate {
   /// \brief The SQL query.
   std::string query;
@@ -66,6 +72,9 @@ struct ARROW_FLIGHT_SQL_EXPORT StatementUpdate {
 };
 
 /// \brief A request to execute a query.
+// 封装获取查询结果集的票据（Ticket）请求。
+// statement_handle（服务器生成的该查询的不透明标识符句柄）。
+// Deserialize(...)（静态方法，用于从序列化的字节流中反解析出 StatementQueryTicket）。
 struct ARROW_FLIGHT_SQL_EXPORT StatementQueryTicket {
   /// \brief The server-generated opaque identifier for the query.
   std::string statement_handle;
@@ -74,18 +83,24 @@ struct ARROW_FLIGHT_SQL_EXPORT StatementQueryTicket {
 };
 
 /// \brief A prepared query statement.
+// 封装预编译查询语句的相关信息。
+// prepared_statement_handle（服务器生成的预编译语句不透明标识符）。
 struct ARROW_FLIGHT_SQL_EXPORT PreparedStatementQuery {
   /// \brief The server-generated opaque identifier for the statement.
   std::string prepared_statement_handle;
 };
 
 /// \brief A prepared update statement.
+// 封装预编译更新语句的相关信息。
+// prepared_statement_handle（预编译语句句柄）。
 struct ARROW_FLIGHT_SQL_EXPORT PreparedStatementUpdate {
   /// \brief The server-generated opaque identifier for the statement.
   std::string prepared_statement_handle;
 };
 
 /// \brief A bulk ingestion request
+// 封装批量数据导入（Bulk Ingestion）请求。
+// table_definition_options（处理表定义的行为选项）、table（目标表名）、schema（可选的数据库模式）、catalog（可选的目录名）、temporary（是否为临时表）、transaction_id（可选的事务 ID）、options（后端特定的扩展选项键值对）。
 struct ARROW_FLIGHT_SQL_EXPORT StatementIngest {
   /// \brief The behavior for handling the table definition.
   TableDefinitionOptions table_definition_options;
@@ -104,12 +119,16 @@ struct ARROW_FLIGHT_SQL_EXPORT StatementIngest {
 };
 
 /// \brief A request to fetch server metadata.
+// 封装获取服务器元数据（SQL Info）的请求。
+// info（需要获取的元数据 ID 列表）。
 struct ARROW_FLIGHT_SQL_EXPORT GetSqlInfo {
   /// \brief A list of metadata IDs to fetch.
   std::vector<int32_t> info;
 };
 
 /// \brief A request to list database schemas.
+// 封装获取数据库模式（Schemas）列表的请求。
+// catalog（可选的目录过滤项）、db_schema_filter_pattern（可选的模式过滤匹配模式）。
 struct ARROW_FLIGHT_SQL_EXPORT GetDbSchemas {
   /// \brief An optional database catalog to filter on.
   std::optional<std::string> catalog;
@@ -118,6 +137,8 @@ struct ARROW_FLIGHT_SQL_EXPORT GetDbSchemas {
 };
 
 /// \brief A request to list database tables.
+// 封装获取表列表的请求。
+// catalog（目录过滤）、db_schema_filter_pattern（模式过滤）、table_name_filter_pattern（表名过滤模式）、table_types（表类型过滤列表）、include_schema（是否在响应中包含 Arrow Schema）。
 struct ARROW_FLIGHT_SQL_EXPORT GetTables {
   /// \brief An optional database catalog to filter on.
   std::optional<std::string> catalog;
@@ -132,12 +153,16 @@ struct ARROW_FLIGHT_SQL_EXPORT GetTables {
 };
 
 /// \brief A request to get SQL data type information.
+// 封装获取 XDBC 数据类型信息的请求。
+// data_type（可选的特定 SQL 类型 ID 过滤）。
 struct ARROW_FLIGHT_SQL_EXPORT GetXdbcTypeInfo {
   /// \brief A specific SQL type ID to fetch information about.
   std::optional<int> data_type;
 };
 
 /// \brief A request to list primary keys of a table.
+// 封装获取表主键信息的请求。
+// table_ref（目标表的引用）。
 struct ARROW_FLIGHT_SQL_EXPORT GetPrimaryKeys {
   /// \brief The given table.
   TableRef table_ref;
@@ -145,12 +170,16 @@ struct ARROW_FLIGHT_SQL_EXPORT GetPrimaryKeys {
 
 /// \brief A request to list foreign key columns referencing primary key
 ///   columns of a table.
+// 封装获取导出键（引用该表主键的外键）的请求。
+// table_ref（目标表的引用）。
 struct ARROW_FLIGHT_SQL_EXPORT GetExportedKeys {
   /// \brief The given table.
   TableRef table_ref;
 };
 
 /// \brief A request to list foreign keys of a table.
+// 封装获取导入键（该表引用的外部主键）的请求。
+// table_ref（目标表的引用）。
 struct ARROW_FLIGHT_SQL_EXPORT GetImportedKeys {
   /// \brief The given table.
   TableRef table_ref;
@@ -158,6 +187,8 @@ struct ARROW_FLIGHT_SQL_EXPORT GetImportedKeys {
 
 /// \brief A request to list foreign key columns of a table that
 ///   reference columns in a given parent table.
+// 封装获取表间交叉引用（外键关系）的请求。
+// pk_table_ref（主表引用），fk_table_ref（外键表引用）。
 struct ARROW_FLIGHT_SQL_EXPORT GetCrossReference {
   /// \brief The parent table (the one containing referenced columns).
   TableRef pk_table_ref;
@@ -166,25 +197,34 @@ struct ARROW_FLIGHT_SQL_EXPORT GetCrossReference {
 };
 
 /// \brief A request to start a new transaction.
+// 开启新事务的请求参数（空结构体）。
 struct ARROW_FLIGHT_SQL_EXPORT ActionBeginTransactionRequest {};
 
 /// \brief A request to create a new savepoint.
+// 创建保存点的请求。
+// transaction_id（父事务 ID），name（保存点自定义名称）。
 struct ARROW_FLIGHT_SQL_EXPORT ActionBeginSavepointRequest {
   std::string transaction_id;
   std::string name;
 };
 
 /// \brief The result of starting a new savepoint.
+// 创建保存点的返回结果。
+// savepoint_id（生成的保存点 ID）。
 struct ARROW_FLIGHT_SQL_EXPORT ActionBeginSavepointResult {
   std::string savepoint_id;
 };
 
 /// \brief The result of starting a new transaction.
+// 开启事务的返回结果。
+// transaction_id（生成的事务 ID）。
 struct ARROW_FLIGHT_SQL_EXPORT ActionBeginTransactionResult {
   std::string transaction_id;
 };
 
 /// \brief A request to end a savepoint.
+// 结束（释放或回滚）保存点的请求。
+// 内嵌枚举 EndSavepoint（包含 kRelease 释放和 kRollback 回滚），savepoint_id（保存点 ID），action（具体动作）。
 struct ARROW_FLIGHT_SQL_EXPORT ActionEndSavepointRequest {
   enum EndSavepoint {
     kRelease,
@@ -196,6 +236,8 @@ struct ARROW_FLIGHT_SQL_EXPORT ActionEndSavepointRequest {
 };
 
 /// \brief A request to end a transaction.
+// 结束（提交或回滚）事务的请求。
+// 内嵌枚举 EndTransaction（包含 kCommit 提交和 kRollback 回滚），transaction_id（事务 ID），action（具体动作）。
 struct ARROW_FLIGHT_SQL_EXPORT ActionEndTransactionRequest {
   enum EndTransaction {
     kCommit,
@@ -207,11 +249,15 @@ struct ARROW_FLIGHT_SQL_EXPORT ActionEndTransactionRequest {
 };
 
 /// \brief An explicit request to cancel a running query.
+// 显式取消正在运行的查询的请求。
+// info（指向要取消的 FlightInfo 的智能指针）。
 struct ARROW_FLIGHT_SQL_EXPORT ActionCancelQueryRequest {
   std::unique_ptr<FlightInfo> info;
 };
 
 /// \brief A request to create a new prepared statement.
+// 通过 SQL 创建预编译语句的请求。
+// query（SQL 查询语句），transaction_id（关联事务 ID）。
 struct ARROW_FLIGHT_SQL_EXPORT ActionCreatePreparedStatementRequest {
   /// \brief The SQL query.
   std::string query;
@@ -220,6 +266,8 @@ struct ARROW_FLIGHT_SQL_EXPORT ActionCreatePreparedStatementRequest {
 };
 
 /// \brief A request to create a new prepared statement with a Substrait plan.
+// 通过 Substrait 计划创建预编译语句的请求。
+// plan（Substrait 计划），transaction_id（关联事务 ID）。
 struct ARROW_FLIGHT_SQL_EXPORT ActionCreatePreparedSubstraitPlanRequest {
   /// \brief The serialized Substrait plan.
   SubstraitPlan plan;
@@ -228,12 +276,16 @@ struct ARROW_FLIGHT_SQL_EXPORT ActionCreatePreparedSubstraitPlanRequest {
 };
 
 /// \brief A request to close a prepared statement.
+// 关闭预编译语句的请求。
+// prepared_statement_handle（要关闭的预编译语句句柄）。
 struct ARROW_FLIGHT_SQL_EXPORT ActionClosePreparedStatementRequest {
   /// \brief The server-generated opaque identifier for the statement.
   std::string prepared_statement_handle;
 };
 
 /// \brief The result of creating a new prepared statement.
+// 创建预编译语句的返回结果。
+// dataset_schema（结果集 Schema）、parameter_schema（参数 Schema）、prepared_statement_handle（生成的预编译语句句柄）。
 struct ARROW_FLIGHT_SQL_EXPORT ActionCreatePreparedStatementResult {
   /// \brief The schema of the query results, if applicable.
   std::shared_ptr<Schema> dataset_schema;
@@ -251,6 +303,7 @@ struct ARROW_FLIGHT_SQL_EXPORT ActionCreatePreparedStatementResult {
 ///
 /// \param[in] statement_handle      The statement handle that will originate the ticket.
 /// \return                          The parsed ticket as an string.
+// 根据传入的语句句柄（Statement Handle）生成一个不透明的二进制 Ticket 字符串，供 Flight SQL 服务端实现内部路由和查询识别使用。
 ARROW_FLIGHT_SQL_EXPORT
 arrow::Result<std::string> CreateStatementQueryTicket(
     const std::string& statement_handle);
@@ -259,8 +312,14 @@ arrow::Result<std::string> CreateStatementQueryTicket(
 ///
 /// Applications should subclass this class and override the virtual
 /// methods declared on this class.
+// FlightSqlServerBase 是 Apache Arrow Flight SQL 服务端架构的核心基类，它继承自通用的 FlightServerBase。
+// 主要作用包括：
+// 实现 Flight SQL 协议分发：作为服务器端框架，它将底层的、通用的 gRPC / Arrow Flight RPC 请求（如 GetFlightInfo、DoGet、DoPut 等）按照 Flight SQL 规范自动解析、转换并分发给对应的专用虚函数。
+// 定义标准的数据库服务器接口：它为开发者提供了一套完整的面向对象虚函数接口（如 GetFlightInfoStatement、DoGetStatement、CreatePreparedStatement、BeginTransaction 等）。开发者在编写自己的 Flight SQL 数据库后端或代理服务时，只需继承 FlightSqlServerBase 并重写这些虚函数，而无需关心复杂的底层 gRPC 和 Protobuf 协议细节。
+// 内置协议消息结构体与工具：源码顶部定义了一系列轻量级的协议消息封装结构体（如 StatementQuery、StatementIngest、各种 Action 请求与结果等），避免直接在公共 API 中暴露繁琐的 Protobuf 类型，同时提供了诸如 CreateStatementQueryTicket 和 RegisterSqlInfo 等辅助工具方法。
 class ARROW_FLIGHT_SQL_EXPORT FlightSqlServerBase : public FlightServerBase {
  private:
+  // 存储服务器支持的 SQL 元数据（SqlInfo）ID 到具体结果映射的内部映射表。配合 RegisterSqlInfo 使用。
   SqlInfoResultMap sql_info_id_to_result_;
 
  public:
@@ -274,6 +333,7 @@ class ARROW_FLIGHT_SQL_EXPORT FlightSqlServerBase : public FlightServerBase {
   /// \param[in] command      The StatementQuery object containing the SQL statement.
   /// \param[in] descriptor   The descriptor identifying the data stream.
   /// \return                 The FlightInfo describing where to access the dataset.
+  // 处理执行 SQL 查询的 GetFlightInfo 请求，返回描述数据集位置的 FlightInfo。
   virtual arrow::Result<std::unique_ptr<FlightInfo>> GetFlightInfoStatement(
       const ServerCallContext& context, const StatementQuery& command,
       const FlightDescriptor& descriptor);
@@ -674,6 +734,7 @@ class ARROW_FLIGHT_SQL_EXPORT FlightSqlServerBase : public FlightServerBase {
   /// \brief Register a new SqlInfo result, making it available when calling GetSqlInfo.
   /// \param[in] id the SqlInfo identifier.
   /// \param[in] result the result.
+// 注册一条特定的 SQL 元数据（SqlInfo）结果，使其在后续响应客户端的 GetSqlInfo 请求时可用。
   void RegisterSqlInfo(int32_t id, const SqlInfoResult& result);
 
   /// @}
@@ -682,16 +743,16 @@ class ARROW_FLIGHT_SQL_EXPORT FlightSqlServerBase : public FlightServerBase {
   /// Applications should not override these methods; they implement
   /// the Flight SQL protocol.
   /// @{
-
+// 拦截底层通用的 GetFlightInfo 请求，解析其 Flight SQL 命令类型，并分发到对应的虚拟 GetFlightInfo... 方法。
   Status GetFlightInfo(const ServerCallContext& context, const FlightDescriptor& request,
                        std::unique_ptr<FlightInfo>* info) final;
-
+  // 拦截通用的 GetSchema 请求并分发到对应的 Schema 获取逻辑。
   Status GetSchema(const ServerCallContext& context, const FlightDescriptor& request,
                    std::unique_ptr<SchemaResult>* schema) override;
-
+  // 拦截通用的 DoGet 请求，根据票据分发到对应的 DoGet... 数据流方法。
   Status DoGet(const ServerCallContext& context, const Ticket& request,
                std::unique_ptr<FlightDataStream>* stream) final;
-
+  // 拦截通用的 DoPut 请求（如数据写入、参数绑定、批量导入等），并分发给对应的 DoPut... 或 CreatePreparedStatement 等处理函数。
   Status DoPut(const ServerCallContext& context,
                std::unique_ptr<FlightMessageReader> reader,
                std::unique_ptr<FlightMetadataWriter> writer) final;
